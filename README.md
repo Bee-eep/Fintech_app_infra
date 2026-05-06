@@ -1,7 +1,4 @@
-# Fintech Application - DevOps Setup Guide
-
-Production-ready fintech application deployment on AWS EKS with Kubernetes, Terraform IaC, and CI/CD automation.
-
+# Fintech Application
 ## Architecture Overview
 
 ```
@@ -54,6 +51,154 @@ Production-ready fintech application deployment on AWS EKS with Kubernetes, Terr
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+# DevOps Class Assignment - BTech CSET 452
+
+**Author:** Apurv Jha (E23CSEU1833)
+
+## Architecture Design
+
+### VPC Structure
+- The application runs across 2 Availability Zones (AZs) inside a custom VPC with one public and one private subnet.
+- **Public Subnets:** Contain the Application Load Balancer (ALB) and NAT Gateway for internet traffic entry/exit.
+- **Private Subnets:** Contain PostgreSQL, EKS nodes, and Redis.
+
+### Service Placement
+
+| Component | Subnet | Reason |
+| :--- | :--- | :--- |
+| ALB | Public | Handles incoming traffic. |
+| EKS Nodes | Private | Safer, not publicly accessible. |
+| PostgreSQL | Private | Contains sensitive data. |
+| Redis | Private | Contains sensitive cache data. |
+| NAT Gateway | Public | Provides outbound internet access. |
+
+### Load Balancing
+Traffic first reaches the ALB and then goes to Kubernetes Ingress. API traffic is routed to backend services while frontend requests go to frontend pods. This setup is easier to manage and update.
+
+### Multi-Region Setup and Availability
+Using two deployment zones:
+1.  **us-east-1** (Primary)
+2.  **us-west-2** (Backup)
+
+Multi-region setup also helps with autoscaling and load balancing, eventually reducing downtime.
+
+### Security and Cost
+- **Security:** Security groups are given least privileges, and all secrets are stored in AWS Secrets Manager.
+- **Cost:** An active-passive multi-region strategy is chosen over active-active for cost efficiency. The standby region uses smaller instance types and minimal node counts, scaling up only during a real failover.
+
+## Terraform Strategy
+
+### Module Design
+
+| Module | Responsibility |
+| :--- | :--- |
+| `vpc` | VPC, public/private subnets, route tables, IGW, NAT Gateways, security groups. |
+| `eks` | EKS cluster, managed node groups, IAM roles, OIDC provider, add-ons (CoreDNS, ALB controller). |
+| `rds` | RDS PostgreSQL instance, subnet group, parameter group, Multi-AZ option. |
+| `redis` | ElastiCache Redis cluster, subnet group, replication group for HA. |
+
+This keeps the code cleaner and easier to manage.
+
+### Remote State Management
+- `tfstate` is stored in **S3** with **DynamoDB locking** to avoid state corruption.
+- Each environment has its own state file.
+
+### Environment Separation
+Instead of workspaces, separate folders are used for each environment. This makes configuration easier and avoids mistakes.
+
+### Multi-Region Provisioning
+Terraform provider aliases are used for the secondary region. Each region has its own infrastructure and separate state file.
+
+### Challenges
+- **State Drift:** Mitigated by running `terraform plan` in CI on every pull request and enforcing no manual AWS console changes in production.
+- **Region Synchronisation:** Module versions must be identical across regions. A shared module registry (or pinned Git tag) ensures both regions are on the same infrastructure version.
+- **Cross-region Data Resources:** Some data sources (e.g., AMI IDs) differ per region and must use the correct provider alias, requiring careful variable templating.
+
+## Docker and Image Strategy
+
+### Dockerfile Optimization
+- **Multi-stage builds** are used to reduce image size. Only required files are copied into the final image.
+- **Docker layer caching** improves CI build speed. Dependencies are copied and installed before application code, maximizing cache usage (a code change only invalidates the last layer).
+
+### Security
+- **Non-root user:** Every Dockerfile ends with `USER node` or `USER appuser`.
+- **Minimal base images:** `alpine` and `slim` variants contain only OS essentials, reducing the attack surface.
+- **Vulnerability scanning:** **Trivy** is integrated into the CI pipeline and fails the build if any HIGH or CRITICAL CVEs are detected.
+- **No secrets in images:** All credentials are injected at runtime via Kubernetes Secrets or AWS Secrets Manager.
+
+### Image Versioning
+Images are stored in **Amazon ECR**, which integrates natively with IAM for access control and supports automatic lifecycle policies.
+
+### CI/CD Integration
+On every push to the `main` or `release/*` branch, GitHub Actions builds the image, runs Trivy scanning, pushes to ECR, and then ArgoCD deploys the latest version to Kubernetes.
+
+## Kubernetes Deployment
+
+### Zero Downtime Deployment
+- **RollingUpdates** are used on all pods so new pods are ready before old ones stop.
+- **Readiness probes** ensure no traffic is routed to a new pod until it passes its readiness check.
+- **Liveness probes** restart pods that are in a deadlock or hung state.
+
+### Autoscaling
+- **Horizontal Pod Autoscaling (HPA):** Scales pods based on:
+    1.  CPU utilization (Target 60%).
+    2.  Custom request-rate metric via Prometheus Adapter.
+- **Cluster Autoscaler:** Adds or removes nodes based on pod resource requests.
+
+### Secret Management
+Kubernetes Secrets are stored in AWS Secrets Manager and synced to K8s using the **External Secrets Operator**.
+
+### Inter-Service Communication
+- All services communicate internally using **ClusterIP** services and DNS names.
+- **Istio** service mesh provides mTLS security, retries, and timeout policies between pods.
+- **Network policies** restrict pod communication (e.g., frontend pods cannot directly access the database).
+
+### GitOps with ArgoCD
+Argo CD constantly checks the Kubernetes manifests in Git repositories. After image tags are updated by GitHub Actions, Argo CD immediately pushes the updates to the cluster. Rollbacks are performed by reverting Git commits.
+
+## CI/CD Pipeline
+
+### Overview
+GitHub Actions handles testing, image building, and security scans. Argo CD handles deployments to Kubernetes.
+
+| Stage | Trigger | What Happens |
+| :--- | :--- | :--- |
+| Lint & Unit Tests | Every push / PR | ESLint, unit tests, code coverage check; fails fast on any error. |
+| Build Docker Image | Push to `main` or `release/*` | Multi-stage Docker build using cached layers. |
+| Security Scan | After build | Trivy scans image; pipeline fails on HIGH/CRITICAL CVEs. |
+| Push to ECR | After scan passes | Image pushed with commit SHA tag and branch tag. |
+| Update GitOps Repo | After push | Automated PR or direct commit updating image tag in manifests repo. |
+
+### Argo CD Stages
+1.  **Sync Detection:** Argo CD polls the GitOps repo every 3 minutes (or via webhook) and detects image tag changes.
+2.  **Progressive Rollout:** Argo CD Rollouts are used for canary deployments in production (e.g., 10% traffic to new version first with automated analysis).
+3.  **Health Gates:** Argo CD checks the health of all Deployments, Services, and Ingress resources before marking a sync as Healthy.
+
+### Failure and Rollback
+If vulnerabilities or deployment failures occur, the rollout is stopped automatically. Rollbacks are done by reverting Git commits.
+
+## Failure and Failover
+
+**Scenario:** Primary Region (us-east-1) becomes unavailable.
+
+### Traffic Failover
+Route 53 health checks monitor the primary region. If it fails, traffic is redirected to the backup region.
+
+### Data Consistency Between Regions
+- **Cross-region RDS replicas** are used for disaster recovery. Replication is asynchronous, so some data loss may occur.
+- After failover, when `us-east-1` recovers, a controlled failback process re-syncs data and redirects Route 53 back to the primary manually to avoid split-brain scenarios.
+
+### Tools & Services Summary
+
+| Concern | Tool / Service |
+| :--- | :--- |
+| DNS failover | Amazon Route 53 with health checks. |
+| Health monitoring | Route 53 health checks + CloudWatch alarms. |
+| Database replication | RDS Cross-Region Read Replica, promoted on failover. |
+| Object storage replication | S3 Cross-Region Replication (CRR). |
+| Secondary cluster readiness | Terraform-provisioned standby EKS cluster (low capacity). |
+| Alerting during failover | PagerDuty + Slack (via CloudWatch alarms). |
 
 ## Prerequisites
 
@@ -471,6 +616,3 @@ terraform destroy -auto-approve
 rm -rf .terraform terraform.tfstate*
 ```
 
-## License
-
-MIT License - See LICENSE file for details
