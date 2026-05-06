@@ -1,3 +1,7 @@
+# DevOps Class Assignment - BTech CSET 452
+
+**Author:** Apurv Jha (E23CSEU1833)
+
 # Fintech Application
 ## Architecture Overview
 
@@ -52,9 +56,6 @@
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-# DevOps Class Assignment - BTech CSET 452
-
-**Author:** Apurv Jha (E23CSEU1833)
 
 ## Architecture Design
 
