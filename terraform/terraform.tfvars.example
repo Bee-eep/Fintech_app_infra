@@ -1,0 +1,36 @@
+# AWS Region
+aws_region = "us-east-1"
+
+# Project Configuration
+project_name = "fintech"
+environment  = "production"
+
+# VPC Configuration
+vpc_cidr_block      = "10.0.0.0/16"
+public_subnet_cidrs = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
+private_subnet_cidrs = ["10.0.11.0/24", "10.0.12.0/24", "10.0.13.0/24"]
+
+# Kubernetes Configuration
+kubernetes_version = "1.29"
+
+# RDS Configuration
+postgres_version     = "15.3"
+db_instance_class    = "db.t3.micro"        # Use db.t3.small or larger in production
+db_allocated_storage = 20                    # In GB
+db_max_allocated_storage = 100              # For autoscaling
+
+# Database Credentials (CHANGE THESE!)
+db_name     = "fintech"
+db_username = "postgres"
+db_password = "ChangeMe!12345"              # Use a strong password!
+
+# Monitoring
+alert_email = "devops@fintech.com"
+
+# Tags
+tags = {
+  CreatedBy   = "Terraform"
+  Purpose     = "Production Fintech Application"
+  CostCenter  = "Engineering"
+  Owner       = "DevOps Team"
+}

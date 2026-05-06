@@ -1,0 +1,59 @@
+---
+# Namespace for the fintech application
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fintech
+  labels:
+    name: fintech
+    environment: production
+
+---
+# ServiceAccount for deployments
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fintech-app
+  namespace: fintech
+  labels:
+    app: fintech
+
+---
+# NetworkPolicy to control traffic within namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: fintech-network-policy
+  namespace: fintech
+spec:
+  podSelector:
+    matchLabels:
+      app: fintech
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: fintech
+      ports:
+        - protocol: TCP
+          port: 3000
+        - protocol: TCP
+          port: 80
+  egress:
+    - to:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 3306
+        - protocol: TCP
+          port: 5432
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 53
+        - protocol: UDP
+          port: 53

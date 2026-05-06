@@ -1,0 +1,157 @@
+name: Deploy to EKS
+
+on:
+  workflow_run:
+    workflows: ["Build and Push Docker Images"]
+    types: [completed]
+    branches: [main, develop]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+
+jobs:
+  deploy:
+    name: Deploy to EKS
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    
+    strategy:
+      matrix:
+        environment: [production]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --name fintech-eks --region ${{ secrets.AWS_REGION }}
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: latest
+
+      - name: Install Kustomize
+        run: |
+          curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          mv kustomize /usr/local/bin/
+
+      - name: Deploy backend
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+        run: |
+          kubectl set image deployment/fintech-backend \
+            backend=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/fintech-backend:$IMAGE_TAG \
+            -n fintech
+          kubectl rollout status deployment/fintech-backend -n fintech --timeout=5m
+
+      - name: Deploy frontend
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+        run: |
+          kubectl set image deployment/fintech-frontend \
+            frontend=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/fintech-frontend:$IMAGE_TAG \
+            -n fintech
+          kubectl rollout status deployment/fintech-frontend -n fintech --timeout=5m
+
+      - name: Verify deployment
+        run: |
+          kubectl get pods -n fintech
+          kubectl get services -n fintech
+          kubectl get ingress -n fintech
+
+      - name: Run smoke tests
+        run: |
+          BACKEND_IP=$(kubectl get svc backend -n fintech -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          echo "Testing backend health: http://$BACKEND_IP:3000/api/health"
+          curl -f http://$BACKEND_IP:3000/api/health || exit 1
+
+      - name: Notify deployment status
+        if: always()
+        uses: slackapi/slack-github-action@v1
+        with:
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          payload: |
+            {
+              "text": "Deployment ${{ job.status }}",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Deployment Status: ${{ job.status }}*\n*Environment:* ${{ matrix.environment }}\n*Commit:* ${{ github.sha }}"
+                  }
+                }
+              ]
+            }
+
+  rollback:
+    name: Rollback on Failure
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: failure()
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --name fintech-eks --region ${{ secrets.AWS_REGION }}
+
+      - name: Rollback backend
+        run: |
+          kubectl rollout undo deployment/fintech-backend -n fintech
+          kubectl rollout status deployment/fintech-backend -n fintech --timeout=5m
+
+      - name: Rollback frontend
+        run: |
+          kubectl rollout undo deployment/fintech-frontend -n fintech
+          kubectl rollout status deployment/fintech-frontend -n fintech --timeout=5m
+
+      - name: Notify rollback
+        uses: slackapi/slack-github-action@v1
+        with:
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          payload: |
+            {
+              "text": "Deployment ROLLED BACK",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*⚠️ Deployment Rolled Back*\n*Commit:* ${{ github.sha }}\n*Reason:* Deployment failed health checks"
+                  }
+                }
+              ]
+            }
